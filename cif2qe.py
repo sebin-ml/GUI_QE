@@ -1,9 +1,8 @@
 import streamlit as st
 from ase.io import read
 from ase.data import atomic_masses, chemical_symbols
-import tempfile
-import os
 
+# Helper
 def ase_symbol_to_z(symbol):
     return chemical_symbols.index(symbol)
 
@@ -53,74 +52,92 @@ def generate_qe_input(atoms, pseudo_map, calc_type, ecutwfc, ecutrho, kpoints):
 
     qe_input_str = "\n".join(lines)
     run_script = f"""#!/bin/bash
-# Run Quantum ESPRESSO
 pw.x < qe_input.in > output.log
 """
 
     return qe_input_str, run_script
 
-# ---------- Streamlit UI ----------
-st.title("🧪 CIF to Quantum ESPRESSO Input Generator")
-st.markdown("Upload a CIF file, assign pseudopotentials for each atom, and generate the QE input file.")
+# ------------------- STREAMLIT APP -------------------
 
-# Upload CIF file
-cif_file = st.file_uploader("📁 Upload CIF file", type=["cif"])
+st.set_page_config("CIF to QE", layout="centered")
 
-if cif_file:
-    try:
-        atoms = read(cif_file)
-        species = sorted(set(atoms.get_chemical_symbols()))
-        st.success(f"✅ Parsed CIF. Detected elements: {', '.join(species)}")
-    except Exception as e:
-        st.error(f"❌ Failed to read CIF file: {str(e)}")
-        atoms = None
-else:
-    atoms = None
-    species = []
+# --- INIT SESSION STATE ---
+if "page" not in st.session_state:
+    st.session_state.page = 1
+if "atoms" not in st.session_state:
+    st.session_state.atoms = None
+if "species" not in st.session_state:
+    st.session_state.species = []
 
-# Upload UPF for each atom type
-pseudo_map = {}
-if atoms:
-    st.subheader("🔗 Upload Pseudopotentials")
+# --- PAGE 1: CIF Upload ---
+if st.session_state.page == 1:
+    st.title("📦 CIF to Quantum ESPRESSO Converter")
+    st.header("Step 1: Upload a CIF File")
+
+    cif_file = st.file_uploader("Upload CIF file", type=["cif"])
+
+    if cif_file:
+        try:
+            atoms = read(cif_file)
+            species = sorted(set(atoms.get_chemical_symbols()))
+            st.success(f"✅ CIF parsed. Detected elements: {', '.join(species)}")
+
+            if st.button("➡ Continue to Upload Pseudopotentials"):
+                st.session_state.atoms = atoms
+                st.session_state.species = species
+                st.session_state.page = 2
+                st.experimental_rerun()
+        except Exception as e:
+            st.error(f"❌ Error reading CIF file:\n{e}")
+
+# --- PAGE 2: Upload UPFs and Parameters ---
+elif st.session_state.page == 2:
+    st.title("🧪 QE Input Setup")
+    st.header("Step 2: Upload Pseudopotentials per Element")
+
+    atoms = st.session_state.atoms
+    species = st.session_state.species
+
+    pseudo_map = {}
     for el in species:
-        pseudo = st.file_uploader(f"Select pseudopotential for `{el}`", type=["UPF", "upf"], key=el)
+        pseudo = st.file_uploader(f"Select .UPF for `{el}`", type=["upf", "UPF"], key=el)
         if pseudo:
             pseudo_map[el] = pseudo
 
-# QE Parameters
-st.subheader("⚙ QE Input Parameters")
-col1, col2, col3 = st.columns(3)
-with col1:
-    calc_type = st.selectbox("Calculation Type", ["scf", "relax", "vc-relax", "nscf"])
-with col2:
-    ecutwfc = st.number_input("ecutwfc (Ry)", value=40.0, min_value=10.0, step=5.0)
-with col3:
-    ecutrho = st.number_input("ecutrho (Ry)", value=320.0, min_value=40.0, step=10.0)
+    st.divider()
+    st.subheader("⚙ QE Parameters")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        calc_type = st.selectbox("Calculation Type", ["scf", "relax", "vc-relax", "nscf"])
+    with col2:
+        ecutwfc = st.number_input("ecutwfc (Ry)", min_value=10.0, value=40.0)
+    with col3:
+        ecutrho = st.number_input("ecutrho (Ry)", min_value=40.0, value=320.0)
 
-kpoints_str = st.text_input("K-points grid (e.g., 4 4 4)", "4 4 4")
-kpoints = kpoints_str.strip().split()
+    kpt_input = st.text_input("K-points Grid (e.g., 4 4 4)", "4 4 4")
+    kpoints = kpt_input.strip().split()
 
-# Generate QE Input File
-if st.button("🛠 Generate QE Input File"):
-    if not atoms:
-        st.error("Please upload a valid CIF file first.")
-    elif len(kpoints) != 3 or not all(k.isdigit() for k in kpoints):
-        st.error("Invalid k-point grid. Please provide 3 integers, e.g., 4 4 4")
-    elif len(pseudo_map) < len(species):
-        missing = [el for el in species if el not in pseudo_map]
-        st.error(f"Missing pseudopotentials for: {', '.join(missing)}")
-    else:
-        qe_input, run_script = generate_qe_input(
-            atoms, pseudo_map, calc_type, ecutwfc, ecutrho, kpoints
-        )
-        if qe_input:
-            st.success("QE input file generated!")
+    # Back button
+    if st.button("⬅ Go Back"):
+        st.session_state.page = 1
+        st.experimental_rerun()
 
-            st.subheader("📄 QE Input Preview")
-            st.code(qe_input, language="text")
+    if st.button("⚙ Generate QE Input File"):
+        if len(pseudo_map) < len(species):
+            st.error("Missing pseudopotentials for some elements.")
+        elif len(kpoints) != 3 or not all(k.isdigit() for k in kpoints):
+            st.error("Invalid k-point grid.")
+        else:
+            qe_input, run_script = generate_qe_input(
+                atoms, pseudo_map, calc_type, ecutwfc, ecutrho, kpoints
+            )
+            if qe_input:
+                st.success("✅ QE input file generated!")
 
-            st.download_button("⬇ Download QE Input File", qe_input, file_name="qe_input.in")
+                st.subheader("📄 Input File Preview")
+                st.code(qe_input, language="text")
+                st.download_button("⬇ Download QE Input", qe_input, file_name="qe_input.in")
 
-            st.subheader("📜 QE Run Script (`pw.sh`)")
-            st.code(run_script, language="bash")
-            st.download_button("⬇ Download Run Script", run_script, file_name="pw.sh")
+                st.subheader("📜 Run Script")
+                st.code(run_script, language="bash")
+                st.download_button("⬇ Download Run Script", run_script, file_name="pw.sh")
