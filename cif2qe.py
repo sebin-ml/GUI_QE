@@ -1,190 +1,132 @@
-import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext
+import streamlit as st
+import os
+import tempfile
 from ase.io import read
 from ase.data import atomic_masses, chemical_symbols
-import os
 import shutil
+import io
 
-# Helper: get atomic number from symbol
 def ase_symbol_to_z(symbol):
     return chemical_symbols.index(symbol)
 
-class CIF2QEConverter:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("CIF to QE Input Converter")
-        self.root.geometry("600x400")
-        self.pseudopotentials = {}
-        self.atoms = None
-        self.species = []
+def generate_qe_input(cif_file, pseudo_files, calc_type, ecutwfc, ecutrho, kpoints):
+    atoms = read(cif_file)
+    species = sorted(set(atoms.get_chemical_symbols()))
 
-        # CIF File Selection
-        tk.Label(root, text="Step 1: Select CIF file", font=("Arial", 12)).pack(pady=10)
-        tk.Button(root, text="Browse CIF", command=self.select_cif, font=("Arial", 11), bg="lightblue").pack()
-        self.status_label = tk.Label(root, text="", font=("Arial", 10))
-        self.status_label.pack(pady=5)
+    # Save pseudopotentials temporarily
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pseudo_dir = os.path.join(tmpdir, "pseudos")
+        os.makedirs(pseudo_dir, exist_ok=True)
 
-        # QE Parameters
-        frame = tk.Frame(root)
-        frame.pack(pady=10)
+        pseudo_map = {}
+        for file in pseudo_files:
+            for el in species:
+                if file.name.lower().startswith(el.lower()) and file.name.lower().endswith('.upf'):
+                    filepath = os.path.join(pseudo_dir, file.name)
+                    with open(filepath, "wb") as f:
+                        f.write(file.read())
+                    pseudo_map[el] = file.name
 
-        tk.Label(frame, text="Calculation:", font=("Arial", 10)).grid(row=0, column=0, padx=5, sticky="e")
-        self.calc_type = tk.Entry(frame, width=10)
-        self.calc_type.insert(0, "scf")
-        self.calc_type.grid(row=0, column=1)
-
-        tk.Label(frame, text="ecutwfc:", font=("Arial", 10)).grid(row=0, column=2, padx=5, sticky="e")
-        self.ecutwfc = tk.Entry(frame, width=10)
-        self.ecutwfc.insert(0, "40")
-        self.ecutwfc.grid(row=0, column=3)
-
-        tk.Label(frame, text="ecutrho:", font=("Arial", 10)).grid(row=0, column=4, padx=5, sticky="e")
-        self.ecutrho = tk.Entry(frame, width=10)
-        self.ecutrho.insert(0, "320")
-        self.ecutrho.grid(row=0, column=5)
-
-        tk.Label(frame, text="K-Points (e.g., 4 4 4):", font=("Arial", 10)).grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky="e")
-        self.kpoints = tk.Entry(frame, width=20)
-        self.kpoints.insert(0, "4 4 4")
-        self.kpoints.grid(row=1, column=2, columnspan=3)
-
-        # Proceed button
-        tk.Button(root, text="Continue to Pseudopotential Selection", command=self.ask_pseudopotentials,
-                  bg="lightgreen", font=("Arial", 12)).pack(pady=20)
-
-    def select_cif(self):
-        cif_path = filedialog.askopenfilename(filetypes=[("CIF files", "*.cif")])
-        if not cif_path:
-            return
-
-        try:
-            self.atoms = read(cif_path)
-            self.species = sorted(set(self.atoms.get_chemical_symbols()))
-            self.cif_path = cif_path
-            self.status_label.config(text=f"Detected elements: {', '.join(self.species)}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to read CIF file:\n{str(e)}")
-
-    def ask_pseudopotentials(self):
-        if not self.atoms:
-            messagebox.showerror("Error", "Please select a CIF file first.")
-            return
-
-        self.popup = tk.Toplevel(self.root)
-        self.popup.title("Select Pseudopotentials")
-        self.popup.geometry("600x100")
-
-        self.labels = {}
-
-        for i, element in enumerate(self.species):
-            tk.Label(self.popup, text=f"{element}:", font=("Arial", 10)).grid(row=i, column=0, padx=10, pady=5, sticky="e")
-            label = tk.Label(self.popup, text="No file selected", width=40, anchor="w")
-            label.grid(row=i, column=1, padx=10)
-            self.labels[element] = label
-
-            tk.Button(self.popup, text="Select .UPF", command=lambda e=element: self.select_upf(e)).grid(row=i, column=2)
-
-        tk.Button(self.popup, text="Generate QE Input File", command=self.generate_input, bg="lightgreen", font=("Arial", 11)).grid(
-            row=len(self.species), column=1, pady=20)
-
-    def select_upf(self, element):
-        upf_path = filedialog.askopenfilename(filetypes=[("UPF files", "*.UPF")])
-        if upf_path:
-            filename = os.path.basename(upf_path)
-            self.pseudopotentials[element] = filename
-            self.labels[element].config(text=filename)
-
-            if not os.path.exists(filename):
-                try:
-                    shutil.copy(upf_path, filename)
-                except Exception as e:
-                    messagebox.showwarning("Copy Failed", f"Could not copy {filename}:\n{str(e)}")
-
-    def generate_input(self):
-        missing = [el for el in self.species if el not in self.pseudopotentials]
+        missing = [el for el in species if el not in pseudo_map]
         if missing:
-            messagebox.showerror("Missing Pseudopotentials", f"Please select UPF files for: {', '.join(missing)}")
-            return
+            st.error(f"Missing pseudopotentials for: {', '.join(missing)}")
+            return None, None
 
-        out_file = os.path.splitext(self.cif_path)[0] + ".in"
-        run_file = os.path.splitext(self.cif_path)[0] + "_pw.sh"
+        lines = []
+        lines.append("&control")
+        lines.append(f"  calculation = '{calc_type}',")
+        lines.append("  prefix = 'calc',")
+        lines.append("  outdir = './tmp',")
+        lines.append("/\n")
 
-        try:
-            lines = []
-            lines.append("&control")
-            lines.append(f"  calculation = '{self.calc_type.get()}',")
-            lines.append("  prefix = 'calc',")
-            lines.append("  outdir = './tmp',")
-            lines.append("/\n")
+        lines.append("&system")
+        lines.append(f"  ibrav = 0,")
+        lines.append(f"  nat = {len(atoms)},")
+        lines.append(f"  ntyp = {len(species)},")
+        lines.append(f"  ecutwfc = {ecutwfc},")
+        lines.append(f"  ecutrho = {ecutrho},")
+        lines.append("/\n")
 
-            lines.append("&system")
-            lines.append(f"  ibrav = 0,")
-            lines.append(f"  nat = {len(self.atoms)},")
-            lines.append(f"  ntyp = {len(set(self.atoms.get_chemical_symbols()))},")
-            lines.append(f"  ecutwfc = {self.ecutwfc.get()},")
-            lines.append(f"  ecutrho = {self.ecutrho.get()},")
-            lines.append("/\n")
+        lines.append("&electrons")
+        lines.append("  conv_thr = 1.0d-6")
+        lines.append("/\n")
 
-            lines.append("&electrons")
-            lines.append("  conv_thr = 1.0d-6")
-            lines.append("/\n")
+        lines.append("CELL_PARAMETERS angstrom")
+        for vec in atoms.get_cell():
+            lines.append("  {:.10f} {:.10f} {:.10f}".format(*vec))
 
-            lines.append("CELL_PARAMETERS angstrom")
-            for vec in self.atoms.get_cell():
-                lines.append("  {:.10f} {:.10f} {:.10f}".format(*vec))
+        lines.append("\nATOMIC_SPECIES")
+        for el in species:
+            z = ase_symbol_to_z(el)
+            mass = atomic_masses[z]
+            lines.append(f"{el}  {mass:.4f}  {pseudo_map[el]}")
 
-            lines.append("\nATOMIC_SPECIES")
-            for el in self.species:
-                z = ase_symbol_to_z(el)
-                mass = atomic_masses[z]
-                lines.append(f"{el}  {mass:.4f}  {self.pseudopotentials[el]}")
+        lines.append("\nATOMIC_POSITIONS angstrom")
+        for atom in atoms:
+            pos = atom.position
+            lines.append(f"{atom.symbol}  {pos[0]:.6f}  {pos[1]:.6f}  {pos[2]:.6f}")
 
-            lines.append("\nATOMIC_POSITIONS angstrom")
-            for s in self.atoms:
-                lines.append(f"{s.symbol}  {s.position[0]:.6f}  {s.position[1]:.6f}  {s.position[2]:.6f}")
+        lines.append("\nK_POINTS automatic")
+        lines.append("  " + " ".join(kpoints) + " 0 0 0")
 
-            lines.append("\nK_POINTS automatic")
-            kpts = self.kpoints.get().strip().split()
-            if len(kpts) != 3:
-                messagebox.showerror("Invalid K-Points", "Please enter 3 integers for k-points (e.g., 4 4 4)")
-                return
-            lines.append("  " + " ".join(kpts) + "  0 0 0\n")
+        # Create input file and run script
+        input_str = "\n".join(lines)
+        run_script = f"""#!/bin/bash
+# Run Quantum ESPRESSO
+pw.x < qe_input.in > output.log
+"""
 
-            with open(out_file, 'w') as f:
-                f.write("\n".join(lines))
-
-            # Write pw.sh script
-            with open(run_file, 'w') as f:
-                f.write("#!/bin/bash\n")
-                f.write("# Run Quantum ESPRESSO pw.x calculation\n")
-                f.write(f"pw.x < {os.path.basename(out_file)} > output.log\n")
-
-            os.chmod(run_file, 0o755)  # make executable
-
-            self.preview_file(out_file)
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to write files:\n{str(e)}")
-
-    def preview_file(self, filepath):
-        try:
-            with open(filepath, 'r') as f:
-                content = f.read()
-
-            preview = tk.Toplevel(self.root)
-            preview.title("Preview of QE Input File")
-            preview.geometry("700x600")
-
-            text = scrolledtext.ScrolledText(preview, wrap=tk.WORD, font=("Courier", 10))
-            text.insert(tk.END, content)
-            text.pack(expand=True, fill='both')
-
-        except Exception as e:
-            messagebox.showerror("Preview Error", str(e))
+        return input_str, run_script
 
 
-# Run GUI
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = CIF2QEConverter(root)
-    root.mainloop()
+# ---------- STREAMLIT UI ----------
+st.title("🧪 CIF to QE Input File Converter")
+st.markdown("Upload your CIF file, select pseudopotentials, and configure Quantum ESPRESSO parameters.")
+
+# Step 1: Upload CIF
+cif_file = st.file_uploader("📁 Upload CIF file", type=["cif"])
+
+# Step 2: Upload pseudopotentials
+pseudo_files = st.file_uploader("📤 Upload .UPF pseudopotentials", type=["upf", "UPF"], accept_multiple_files=True)
+
+# Step 3: QE parameters
+col1, col2, col3 = st.columns(3)
+with col1:
+    calc_type = st.selectbox("Calculation Type", ["scf", "relax", "vc-relax", "nscf"])
+with col2:
+    ecutwfc = st.number_input("ecutwfc (Ry)", min_value=10.0, value=40.0)
+with col3:
+    ecutrho = st.number_input("ecutrho (Ry)", min_value=40.0, value=320.0)
+
+kpoints = st.text_input("K-Points Grid (e.g. 4 4 4)", "4 4 4")
+
+# Step 4: Generate input file
+if st.button("⚙ Generate QE Input"):
+    if not cif_file or not pseudo_files:
+        st.warning("Please upload both CIF and pseudopotential files.")
+    else:
+        kpt_list = kpoints.strip().split()
+        if len(kpt_list) != 3 or not all(k.isdigit() for k in kpt_list):
+            st.error("❌ Invalid k-points. Enter 3 integers like: 4 4 4")
+        else:
+            qe_input, run_script = generate_qe_input(
+                cif_file,
+                pseudo_files,
+                calc_type,
+                ecutwfc,
+                ecutrho,
+                kpt_list
+            )
+
+            if qe_input:
+                st.success("✅ QE input file generated!")
+
+                st.subheader("📄 Preview: QE Input File")
+                st.code(qe_input, language="bash")
+
+                st.download_button("⬇ Download QE Input File", qe_input, file_name="qe_input.in")
+
+                st.subheader("🛠 Run Script (pw.sh)")
+                st.code(run_script, language="bash")
+                st.download_button("⬇ Download Run Script", run_script, file_name="pw.sh")
+
