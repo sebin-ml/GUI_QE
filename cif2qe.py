@@ -2,10 +2,12 @@ import streamlit as st
 from ase.io import read
 from ase.data import atomic_masses, chemical_symbols
 from ase.geometry import cell_to_cellpar
+import spglib
 
 # Helper
 def ase_symbol_to_z(symbol):
     return chemical_symbols.index(symbol)
+    
 def determine_ibrav(cell):
     a, b, c, alpha, beta, gamma = cell_to_cellpar(cell)
     a, b, c = round(a, 3), round(b, 3), round(c, 3)
@@ -28,8 +30,14 @@ def determine_ibrav(cell):
     else:
         return 0  # unknown
 
+def get_spacegroup_info(atoms):
+    lattice = atoms.get_cell()
+    positions = atoms.get_scaled_positions()
+    numbers = atoms.get_atomic_numbers()
+    dataset = spglib.get_symmetry_dataset((lattice, positions, numbers))
+    return dataset['international'], dataset['number']
 
-def generate_qe_input(atoms, pseudo_map, calc_type, ecutwfc, ecutrho, kpoints):
+def generate_qe_input(atoms, pseudo_map, calc_type, ecutwfc, ecutrho, raw_ibrav, kpoints):
     species = sorted(set(atoms.get_chemical_symbols()))
     missing = [el for el in species if el not in pseudo_map]
     if missing:
@@ -44,7 +52,7 @@ def generate_qe_input(atoms, pseudo_map, calc_type, ecutwfc, ecutrho, kpoints):
     lines.append("/\n")
 
     lines.append("&system")
-    lines.append(f"  ibrav = {ibrav},")
+    lines.append(f"  ibrav = {raw_ibrav},")
     lines.append(f"  nat = {len(atoms)},")
     lines.append(f"  ntyp = {len(species)},")
     lines.append(f"  ecutwfc = {ecutwfc},")
@@ -104,8 +112,18 @@ if st.session_state.page == 1:
             atoms = read(cif_file)
             species = sorted(set(atoms.get_chemical_symbols()))
             cell = atoms.get_cell()
-            ibrav = determine_ibrav(cell)
             a, b, c, alpha, beta, gamma = cell_to_cellpar(cell)
+            
+            spg_name, spg_num = get_spacegroup_info(atoms)
+            st.success(f"🧬 Space Group: **{spg_name} ({spg_num})**")
+
+            raw_ibrav = determine_ibrav(cell)
+            st.markdown(f"**Lattice Parameters:** a = {a:.3f}, b = {b:.3f}, c = {c:.3f} Å")
+            st.markdown(f"**Angles:** α = {alpha:.2f}°, β = {beta:.2f}°, γ = {gamma:.2f}°")
+
+            force_ibrav0 = st.checkbox("🔁 Force `ibrav = 0` (include full CELL_PARAMETERS)", value=(raw_ibrav == 0))
+            ibrav = 0 if force_ibrav0 else raw_ibrav
+            st.info(f"Using `ibrav = {ibrav}`")
             
             st.success(f"✅ CIF parsed. Detected elements: {', '.join(species)}")
 
@@ -135,15 +153,13 @@ elif st.session_state.page == 2:
 
     st.divider()
     st.subheader("⚙ QE Parameters")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     with col1:
         calc_type = st.selectbox("Calculation Type", ["scf", "relax", "vc-relax", "nscf"])
     with col2:
         ecutwfc = st.number_input("ecutwfc (Ry)", min_value=10.0, value=40.0)
     with col3:
         ecutrho = st.number_input("ecutrho (Ry)", min_value=40.0, value=320.0)
-    with col4:
-        ibrav = st.number_input("ibrav", min_value=0.0, value=ibrav)
 
     kpt_input = st.text_input("K-points Grid (e.g., 4 4 4)", "4 4 4")
     kpoints = kpt_input.strip().split()
